@@ -1,28 +1,26 @@
 from rest_framework.views import APIView
+from rest_framework import generics, status
+from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from rest_framework import status, permissions
 from rest_framework.decorators import api_view, permission_classes, authentication_classes
 from rest_framework.permissions import AllowAny
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
-from django.db.models import Q, Sum, Avg, Count
-
-import uuid
+from django.db.models import Sum, Avg
 import requests
 import hmac
 import hashlib
 import requests
 from decimal import Decimal
 
-from .models import Wallet, Contract, CovalentUser, Dispute, DisputeEvidence, ArbitrationVote, MerchantAPIKey
+from .models import Wallet, Contract, CovalentUser, Dispute, DisputeEvidence, ArbitrationVote, MerchantAPIKey, PlatformAuditLog
 from .serializers import (
     KYCSubmissionSerializer, UserProfileSerializer, WalletSerializer, 
-    BankResolveSerializer, BankLinkSerializer, ContractSerializer, AnonymizedDisputeSerializer
+    BankResolveSerializer, BankLinkSerializer, RegistrationSerializer, ContractSerializer
 )
 from .paystack import PaystackService
-from .ai_contract import AIContractService
-from .media_scrubber import MediaScrubberService
-from rest_framework.parsers import MultiPartParser, FormParser
 
 
 class KYCVerificationView(APIView):
@@ -51,6 +49,27 @@ class KYCVerificationView(APIView):
             "message": "KYC verification successful!",
             "user": UserProfileSerializer(user).data
         }, status=status.HTTP_200_OK)
+
+
+class RegistrationView(generics.CreateAPIView):
+    serializer_class = RegistrationSerializer
+    permission_classes = [AllowAny]
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.save()
+        
+        # Generate JWT tokens for the immediate login
+        refresh = RefreshToken.for_user(user)
+        
+        return Response({
+            "user": serializer.data,
+            "tokens": {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }
+        }, status=status.HTTP_201_CREATED)
 
 
 class UserProfileView(APIView):
@@ -128,107 +147,7 @@ class WalletDashboardView(APIView):
         }, status=status.HTTP_200_OK)
     
 
-class GenerateContractView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request):
-        prompt = request.data.get("prompt")
-        vendor_email = request.data.get("vendor_email")
-        
-        if not prompt or not vendor_email:
-            return Response(
-                {"detail": "Both a deal description and vendor email are required."}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-            
-        try:
-            ai_service = AIContractService()
-            contract_data = ai_service.parse_contract_prompt(prompt)
-            
-            contract = Contract.objects.create(
-                creator=request.user,
-                vendor_email=vendor_email,
-                item_title=contract_data["item_title"],
-                item_description=contract_data["item_description"],
-                item_amount=contract_data["item_amount"],
-                delivery_fee=contract_data["delivery_fee"],
-                plain_language_summary=contract_data["plain_language_summary"]
-            )
-            
-            return Response({
-                "contract_id": contract.contract_id,
-                "terms": contract_data,
-                "total_escrow": contract.total_escrow
-            }, status=status.HTTP_201_CREATED)
-            
-        except Exception as e:
-            return Response(
-                {"detail": str(e)}, 
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-
-class InitializeEscrowPaymentView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request):
-        contract_id = request.data.get("contract_id")
-        
-        try:
-            contract = Contract.objects.get(contract_id=contract_id, creator=request.user)
-        except Contract.DoesNotExist:
-            return Response(
-                {"detail": "Contract not found or you are not authorized to fund it."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        try:
-            # Using CovalentUser directly satisfies Pylance strict typing
-            vendor = CovalentUser.objects.get(email=contract.vendor_email)
-            if not vendor.paystack_subaccount_code:
-                return Response(
-                    {"detail": f"Vendor ({contract.vendor_email}) has not linked a settlement bank account yet."}, 
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except CovalentUser.DoesNotExist:
-            return Response(
-                {"detail": "The vendor email provided is not registered on Covalent."}, 
-                status=status.HTTP_404_NOT_FOUND
-            )
-
-        reference = f"COVA-{uuid.uuid4().hex[:8].upper()}"
-        contract.paystack_reference = reference
-        contract.status = "AWAITING_FUNDING"
-        contract.save()
-
-        headers = {
-            "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}", 
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "email": request.user.email,
-            "amount": int(contract.total_escrow * 100),  # Amount in kobo
-            "reference": reference,
-            "callback_url": "http://localhost:5173/",
-        }
-        
-        # SMART MOCK BYPASS: Skip subaccount split if testing with mock codes
-        if not str(vendor.paystack_subaccount_code).startswith("ACCT_mock"):
-            payload["subaccount"] = vendor.paystack_subaccount_code
-            payload["bearer"] = "subaccount"
-        
-        res = requests.post("https://api.paystack.co/transaction/initialize", json=payload, headers=headers)
-        
-        if res.status_code == 200:
-            return Response(res.json()["data"], status=status.HTTP_200_OK)
-            
-        error_data = res.json()
-        print("PAYSTACK API ERROR:", error_data)
-        return Response(
-            {"detail": f"Paystack Error: {error_data.get('message', 'Unknown error')}"}, 
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
 
 @csrf_exempt
 @api_view(['POST'])
@@ -270,221 +189,23 @@ def paystack_webhook(request):
     return Response(status=status.HTTP_200_OK)
 
 
-class ContractActionView(APIView):
+class ContractDeleteView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request, contract_id, action):
-        contract = None
-
-        # Robust multi-field lookup
-        for field in ['contract_id', 'id', 'paystack_reference']:
-            try:
-                contract = Contract.objects.filter(**{field: contract_id}).first()
-                if contract:
-                    break
-            except Exception:
-                continue
-
-        if not contract:
-            return Response({"detail": "Contract not found in database."}, status=status.HTTP_404_NOT_FOUND)
-
-        user = request.user
-
-        # ACTION 1: Vendor marks package as dispatched
-        if action == "dispatch":
-            if user.email != contract.vendor_email or contract.status != "FUNDED":
-                return Response({"detail": "Unauthorized or invalid state for dispatch."}, status=400)
-            contract.status = "IN_TRANSIT"
-            contract.save()
-            return Response({"message": "Package marked as in transit!"}, status=200)
-
-        # ACTION 2: Buyer confirms receipt (Standard Payout + 5% Covalent Take)
-        elif action in ["reject-at-door", "dispute"]:
-            if user != contract.creator or contract.status not in ["FUNDED", "IN_TRANSIT"]:
-                return Response({"detail": "Unauthorized or invalid state for rejection."}, status=400)
-
-            # 1. Update Contract Status
-            contract.status = "DISPUTED"
-            contract.save()
-
-            # 2. AUTO-CREATE THE DISPUTE RECORD FOR THE LAWYER QUEUE!
-            Dispute.objects.get_or_create(
-                contract=contract,
-                defaults={
-                    "reason": "Doorstep Rejection / Item Misrepresentation",
-                    "description": f"Buyer ({user.email}) rejected the deal at delivery. Case escalated for legal arbitration.",
-                    "status": "PENDING"
-                }
+    def delete(self, request, contract_id):
+        try:
+            contract = Contract.objects.get(
+                contract_id=contract_id,
+                creator=request.user,
+                status__in=["DRAFT", "AWAITING_FUNDING", "UNFUNDED"]
             )
-
-            # 3. Apply dispatch penalty & trust score deductions
-            vendor_wallet, _ = Wallet.objects.get_or_create(user__email=contract.vendor_email)
-            vendor = vendor_wallet.user
-            
-            if hasattr(vendor_wallet, 'dispute_penalty_balance'):
-                vendor_wallet.dispute_penalty_balance += contract.delivery_fee
-            elif hasattr(vendor_wallet, 'penalty_balance'):
-                vendor_wallet.penalty_balance += contract.delivery_fee
-            vendor_wallet.save()
-
-            vendor.trust_score = max(vendor.trust_score - 15, 0)
-            vendor.save()
-
-            return Response({
-                "message": f"Deal disputed! Dispute record #COVA-DSP created for Lawyer Chamber. Seller debited ₦{contract.delivery_fee:,.2f} for dispatch."
-            }, status=200)
-
-        return Response({"detail": "Invalid action parameter."}, status=400)
-
-class UserContractsListView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    
-    def get(self, request):
-        contracts = Contract.objects.filter(
-            Q(creator=request.user) | Q(vendor_email=request.user.email)
-        ).order_by('-created_at')
-        
-        serializer = ContractSerializer(contracts, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-    
-class DisputeEvidenceUploadView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-    parser_classes = [MultiPartParser, FormParser] # Required for handling file uploads
-
-    def post(self, request, dispute_id):
-        try:
-            dispute = Dispute.objects.get(id=dispute_id)
-        except Dispute.DoesNotExist:
-            return Response({"detail": "Dispute not found."}, status=status.HTTP_404_NOT_FOUND)
-
-        file_obj = request.FILES.get("file")
-        file_type = request.data.get("file_type", "IMAGE")
-
-        if not file_obj:
-            return Response({"detail": "No file uploaded."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # 1. Save raw evidence
-        evidence = DisputeEvidence.objects.create(
-            dispute=dispute,
-            uploader=request.user,
-            original_file=file_obj,
-            file_type=file_type
-        )
-
-        # 2. Run automated privacy scrubbing
-        try:
-            MediaScrubberService.process_evidence(evidence)
-            return Response({
-                "message": "Evidence uploaded and privacy-scrubbed successfully!",
-                "evidence_id": evidence.id,
-                "clean_file_url": evidence.scrubbed_file.url if evidence.scrubbed_file else None
-            }, status=status.HTTP_201_CREATED)
-        except Exception as e:
-            return Response({
-                "detail": "File saved, but media scrubbing failed. Please check file format."
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-
-class VerifyPaystackPaymentView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request):
-        reference = request.data.get("reference")
-        if not reference:
-            return Response({"detail": "Transaction reference is required."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            contract = Contract.objects.get(paystack_reference=reference)
-            
-            # SMART LOCALHOST VERIFICATION:
-            # If stuck in AWAITING_FUNDING (because public webhooks can't reach localhost),
-            # auto-verify the payment and lock the funds in the vendor's escrow vault!
-            if contract.status == "AWAITING_FUNDING":
-                contract.status = "FUNDED"
-                contract.save()
-                
-                vendor_wallet, _ = Wallet.objects.get_or_create(user__email=contract.vendor_email)
-                vendor_wallet.locked_escrow_balance += contract.total_escrow
-                vendor_wallet.save()
-
-            return Response(ContractSerializer(contract).data, status=status.HTTP_200_OK)
-            
+            contract.delete()
+            return Response({"message": "Draft contract deleted successfully."}, status=status.HTTP_204_NO_CONTENT)
         except Contract.DoesNotExist:
-            return Response({"detail": "Contract with this reference not found."}, status=status.HTTP_404_NOT_FOUND)
-        
-
-class LawyerDisputeQueueView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get(self, request):
-        if not request.user.is_lawyer:
-            return Response({"detail": "Access denied. Verified lawyer status required."}, status=403)
-        
-        # Return open disputes that this specific lawyer hasn't voted on yet
-        disputes = Dispute.objects.filter(status="IN_REVIEW").exclude(votes__lawyer=request.user)
-        serializer = AnonymizedDisputeSerializer(disputes, many=True)
-        return Response(serializer.data, status=200)
-
-
-class CastArbitrationVoteView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, dispute_id):
-        user = request.user
-        if not user.is_lawyer:
-            return Response({"detail": "Only verified legal reviewers can cast arbitration votes."}, status=403)
-
-        ruling = request.data.get("ruling") # 'BUYER' or 'VENDOR'
-        justification = request.data.get("justification", "")
-
-        try:
-            dispute = Dispute.objects.get(id=dispute_id, status="IN_REVIEW")
-        except Dispute.DoesNotExist:
-            return Response({"detail": "Dispute not found or already closed."}, status=404)
-
-        # 1. Record vote
-        try:
-            ArbitrationVote.objects.create(
-                dispute=dispute,
-                lawyer=user,
-                ruling=ruling,
-                legal_justification=justification
+            return Response(
+                {"detail": "Draft not found or cannot be deleted once funded or disputed."},
+                status=status.HTTP_400_BAD_REQUEST
             )
-            user.lawyer_cases_resolved += 1
-            user.save()
-        except Exception:
-            return Response({"detail": "You have already cast a vote on this case."}, status=400)
-
-        # 2. CONSENSUS ENGINE: Check if either side has reached 2 votes
-        buyer_votes = dispute.votes.filter(ruling="BUYER").count()
-        vendor_votes = dispute.votes.filter(ruling="VENDOR").count()
-        contract = dispute.contract
-        vendor_wallet, _ = Wallet.objects.get_or_create(user__email=contract.vendor_email)
-
-        if buyer_votes >= 2:
-            dispute.status = "RESOLVED_BUYER"
-            dispute.save()
-            contract.status = "REFUNDED"
-            contract.save()
-            
-            # Remove funds from vendor's locked escrow (Refund initiated to buyer)
-            vendor_wallet.locked_escrow_balance -= contract.total_escrow
-            vendor_wallet.save()
-            return Response({"message": "Vote recorded! Consensus reached: Case resolved in favor of BUYER. Refund triggered."}, status=200)
-
-        elif vendor_votes >= 2:
-            dispute.status = "RESOLVED_VENDOR"
-            dispute.save()
-            contract.status = "RELEASED"
-            contract.save()
-            
-            # Release funds to vendor available balance minus platform fee
-            vendor_wallet.locked_escrow_balance -= contract.total_escrow
-            vendor_wallet.available_balance += (contract.total_escrow * Decimal('0.95'))
-            vendor_wallet.save()
-            return Response({"message": "Vote recorded! Consensus reached: Case resolved in favor of VENDOR. Escrow released."}, status=200)
-
-        return Response({"message": f"Vote recorded successfully. Case stands at {buyer_votes} for Buyer vs {vendor_votes} for Vendor."}, status=200)
     
 
 class PlatformAdminDashboardView(APIView):

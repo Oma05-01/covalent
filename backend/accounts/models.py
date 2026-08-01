@@ -4,6 +4,7 @@ from decimal import Decimal
 import uuid
 from django.conf import settings
 import secrets
+from django.utils.crypto import get_random_string
 
 class CovalentUserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -27,7 +28,17 @@ class CovalentUserManager(BaseUserManager):
 
         return self.create_user(email, password, **extra_fields)
 
+def generate_public_id():
+    return f"CVL-{get_random_string(6).upper()}"
+
 class CovalentUser(AbstractBaseUser, PermissionsMixin):
+
+    class Role(models.TextChoices):
+        BUYER = 'BUYER', 'Buyer'
+        VENDOR = 'VENDOR', 'Vendor'
+        LAWYER = 'LAWYER', 'Lawyer'
+
+
     RISK_LEVELS = [
         ("LOW", "Low Risk"),
         ("MEDIUM", "Medium Risk"),
@@ -40,6 +51,18 @@ class CovalentUser(AbstractBaseUser, PermissionsMixin):
     first_name = models.CharField(max_length=100)
     last_name = models.CharField(max_length=100)
     phone_number = models.CharField(max_length=20, blank=True)
+    public_id = models.CharField(
+        max_length=15, 
+        unique=True, 
+        default=generate_public_id,
+        editable=False
+    )
+    role = models.CharField(
+        max_length=10,
+        choices=Role.choices,
+        default=Role.BUYER
+    )
+    nin = models.CharField(max_length=11, unique=True, null=True, blank=True)
 
     # KYC & Paystack Integration
     nin = models.CharField(max_length=11, unique=True, null=True, blank=True, help_text="National Identity Number")
@@ -85,6 +108,37 @@ class CovalentUser(AbstractBaseUser, PermissionsMixin):
             return "🟠 Watchlist"
         return "🔴 Restricted"
 
+    def is_eligible_for_escrow(self):
+        """
+        Evaluates if the user meets the compliance and risk criteria
+        required to participate in escrow smart contracts.
+        """
+        # Block if KYC is incomplete
+        if not self.is_kyc_verified:
+            return False
+            
+        # Block if the automated fraud risk engine flagged them as HIGH
+        if self.fraud_risk_level == 'HIGH':
+            return False
+            
+        # Block if their reputation score dropped below the critical threshold of 50
+        if self.trust_score < 50:
+            return False
+            
+        # If they pass all checks, they are good to go
+        return True
+
+    def save(self, *args, **kwargs):
+        # Generate CVL-XXXXX public ID on first creation
+        if not self.public_id:
+            while True:
+                new_id = f"CVL-{get_random_string(6).upper()}"
+                if not CovalentUser.objects.filter(public_id=new_id).exists():
+                    self.public_id = new_id
+                    break
+        super().save(*args, **kwargs)
+
+
 class Wallet(models.Model):
     user = models.OneToOneField(CovalentUser, on_delete=models.CASCADE, related_name="wallet")
     available_balance = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal('0.00'))
@@ -105,11 +159,14 @@ class MerchantAPIKey(models.Model):
     def __str__(self):
         return f"{self.name} - {self.user.email}"
 
+
 class Contract(models.Model):
     STATUS_CHOICES = [
         ("DRAFT", "Draft"),
         ("AWAITING_FUNDING", "Awaiting Funding"),
         ("FUNDED", "Funded & Active"),
+        ("DELIVERED", "Delivered - Awaiting Inspection"),
+        ("DISPUTED", "In Dispute"),                       
         ("RELEASED", "Completed"),
     ]
     contract_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -123,6 +180,11 @@ class Contract(models.Model):
     total_escrow = models.DecimalField(max_digits=12, decimal_places=2, blank=True)
     plain_language_summary = models.TextField()
     
+    # 🆕 Inspection Window Config
+    inspection_period_hours = models.PositiveIntegerField(default=24)
+    delivered_at = models.DateTimeField(null=True, blank=True)
+    auto_release_at = models.DateTimeField(null=True, blank=True)
+    
     status = models.CharField(max_length=30, choices=STATUS_CHOICES, default="DRAFT")
     paystack_reference = models.CharField(max_length=100, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -133,6 +195,7 @@ class Contract(models.Model):
 
     def __str__(self):
         return f"{self.item_title} ({self.contract_id})"
+
 
 class Dispute(models.Model):
     STATUS_CHOICES = [
@@ -172,7 +235,28 @@ class ArbitrationVote(models.Model):
     ruling = models.CharField(max_length=10, choices=VOTE_CHOICES)
     legal_justification = models.TextField(help_text="Brief explanation of the ruling based on contract terms")
     voted_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         # Prevent a lawyer from voting twice on the same dispute
         unique_together = ('dispute', 'lawyer')
+
+
+class PlatformAuditLog(models.Model):
+    user = models.ForeignKey(CovalentUser, on_delete=models.SET_NULL, null=True, related_name='audit_logs')
+    action_type = models.CharField(max_length=100)
+    description = models.TextField()
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.user.email if self.user else 'System'} | {self.action_type} | {self.created_at.strftime('%Y-%m-%d %H:%M')}"
+
+
+class NotificationPreferences(models.Model):
+    user = models.OneToOneField(CovalentUser, on_delete=models.CASCADE, related_name='notification_preferences')
+    email_alerts = models.BooleanField(default=True)
+    sms_alerts = models.BooleanField(default=False)
