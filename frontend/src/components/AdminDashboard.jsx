@@ -1,6 +1,11 @@
 import { useState, useEffect } from 'react';
 import api from '../services/api';
 
+// Reusable primitive
+function SectionLabel({ children }) {
+  return <p className="text-[10px] font-semibold tracking-widest text-slate-400 uppercase mb-3">{children}</p>;
+}
+
 export default function AdminDashboard() {
   const [metrics, setMetrics] = useState(null);
   const [users, setUsers] = useState([]);
@@ -39,136 +44,171 @@ export default function AdminDashboard() {
     }
   };
 
-  if (loading) return <div className="p-12 text-center text-slate-500 font-mono">Loading platform telemetry...</div>;
-  if (error) return <div className="p-6 bg-red-50 text-red-600 border border-red-200 rounded-xl font-bold">{error}</div>;
+  const fmtNGN = (n) => "₦" + Number(n).toLocaleString("en-NG");
+
+  if (loading) return <div className="p-12 text-center text-slate-500 font-medium">Loading platform telemetry...</div>;
+  if (error) return <div className="p-6 bg-red-50 text-red-600 border border-red-200 rounded-xl font-bold max-w-2xl mx-auto mt-8">{error}</div>;
+
+  // Map live backend data to the design's stat cards
+  const stats = [
+    { label: "Total GMV", value: fmtNGN(metrics?.financials?.total_gmv || 0), sub: "Cumulative volume", icon: "M13 7h8m0 0v8m0-8l-8 8-4-4-6 6", color: "text-slate-900" },
+    { label: "Escrow Vault", value: fmtNGN(metrics?.financials?.locked_vault || 0), sub: "Currently locked", icon: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z", color: "text-emerald-700" },
+    { label: "Covalent Revenue (5%)", value: fmtNGN(metrics?.financials?.platform_revenue || 0), sub: "Platform earnings", icon: "M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z", color: "text-amber-700" },
+    { label: "Open Disputes", value: metrics?.governance?.active_disputes || 0, sub: "Pending arbitration", icon: "M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z", color: "text-red-600" },
+  ];
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-300">
-      
-      {/* Header Banner */}
-      <div className="bg-slate-900 text-white p-6 rounded-2xl flex justify-between items-center shadow-lg border border-slate-800">
+    <div className="max-w-5xl mx-auto px-4 md:px-6 py-6">
+      {/* Header */}
+      <div className="flex items-center gap-3 mb-6">
+        <div className="w-9 h-9 rounded-xl bg-slate-900 flex items-center justify-center">
+          <svg className="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+          </svg>
+        </div>
         <div>
-          <span className="text-[10px] font-bold uppercase tracking-widest bg-purple-500/20 text-purple-400 px-3 py-1 rounded-full border border-purple-500/30">
-            Phase 7: Founder Control
-          </span>
-          <h2 className="text-2xl font-black mt-2">Platform Command Center</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Real-time revenue telemetry, escrow vault monitoring, and trust governance.</p>
+          <div className="flex items-center gap-2">
+            <h2 className="text-slate-900 font-semibold text-base">Command Center</h2>
+            <span className="text-[9px] font-bold uppercase tracking-widest bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full border border-purple-200">
+              Phase 7: Founder Control
+            </span>
+          </div>
+          <p className="text-slate-500 text-xs mt-0.5">Real-time revenue telemetry & trust governance</p>
         </div>
-        <div className="text-right font-mono">
-          <span className="text-xs text-slate-400 block">Total Active Users</span>
-          <span className="text-2xl font-bold text-white">{metrics?.governance?.total_users || 0}</span>
+        <div className="ml-auto flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+          <span className="text-xs text-slate-500 font-medium">Live</span>
         </div>
       </div>
 
-      {/* Financial Telemetry Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-        
-        {/* Covalent 5% Revenue Card */}
-        <div className="bg-gradient-to-br from-purple-900 to-slate-900 text-white p-5 rounded-2xl shadow-sm border border-purple-800/50 relative overflow-hidden">
-          <div className="text-xs font-bold text-purple-300 uppercase tracking-wider">Covalent Net Revenue (5%)</div>
-          <div className="text-2xl font-black font-mono mt-2 text-emerald-400">
-            ₦{Number(metrics?.financials?.platform_revenue || 0).toLocaleString()}
-          </div>
-          <div className="text-[11px] text-slate-300 mt-2">
-            Captured from ₦{Number(metrics?.financials?.total_gmv || 0).toLocaleString()} Total GMV
-          </div>
-        </div>
-
-        {/* Locked Vault Card */}
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80">
-          <div className="text-xs font-bold text-slate-400 uppercase tracking-wider">Locked Escrow Vault</div>
-          <div className="text-2xl font-black font-mono mt-2 text-slate-900">
-            ₦{Number(metrics?.financials?.locked_vault || 0).toLocaleString()}
-          </div>
-          <div className="text-[11px] text-slate-500 mt-2">
-            Currently held in active pipeline deals
-          </div>
-        </div>
-
-        {/* Governance Health Card */}
-        <div className="bg-white p-5 rounded-2xl shadow-sm border border-slate-200/80 flex justify-between flex-col">
-          <div>
-            <div className="text-xs font-bold text-slate-400 uppercase tracking-wider">Governance Health</div>
-            <div className="flex justify-between items-baseline mt-2">
-              <span className="text-2xl font-black font-mono text-slate-900">{metrics?.governance?.avg_trust_score} <span className="text-xs font-normal text-slate-400">Avg Trust</span></span>
-              <span className="text-sm font-bold text-amber-600 bg-amber-50 px-2.5 py-0.5 rounded-full">{metrics?.governance?.active_disputes} Open Disputes</span>
+      {/* Financial KPIs */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+        {stats.map(s => (
+          <div key={s.label} className="bg-white rounded-2xl border border-slate-200/80 p-4 shadow-sm">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold leading-tight">{s.label}</p>
+              <div className="w-7 h-7 rounded-lg bg-slate-50 flex items-center justify-center">
+                <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d={s.icon} />
+                </svg>
+              </div>
             </div>
+            <p className={`font-mono text-xl md:text-2xl font-bold leading-tight ${s.color}`}>{s.value}</p>
+            <p className="text-[10px] text-slate-400 mt-1">{s.sub}</p>
           </div>
-          <div className="text-[11px] text-slate-500 mt-2 border-t border-slate-100 pt-2 flex justify-between">
-            <span>Verified Lawyers: <strong className="text-slate-700">{metrics?.governance?.verified_lawyers}</strong></span>
-            <span>System Status: <strong className="text-emerald-600">Optimal</strong></span>
-          </div>
-        </div>
-
+        ))}
       </div>
 
-      {/* God-Mode User Management Table */}
-      <div className="bg-white border border-slate-200/80 rounded-2xl p-6 shadow-sm overflow-hidden">
-        <h3 className="text-base font-bold text-slate-900 mb-4">Live User Registry & Trust Override</h3>
-        
+      {/* Governance Stats Bar */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 p-4 mb-6 flex items-center justify-between shadow-sm">
+        <div className="flex items-center gap-6">
+          <div>
+            <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-1">Total Users</p>
+            <p className="font-mono text-lg font-bold text-slate-900">{metrics?.governance?.total_users || 0}</p>
+          </div>
+          <div className="w-px h-8 bg-slate-100"></div>
+          <div>
+            <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-1">Avg Trust</p>
+            <p className="font-mono text-lg font-bold text-slate-900">{metrics?.governance?.avg_trust_score || 0}<span className="text-xs text-slate-400 font-normal">/100</span></p>
+          </div>
+          <div className="w-px h-8 bg-slate-100"></div>
+          <div>
+            <p className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold mb-1">Verified Lawyers</p>
+            <p className="font-mono text-lg font-bold text-purple-700">{metrics?.governance?.verified_lawyers || 0}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* User Management Table */}
+      <div className="bg-white rounded-2xl border border-slate-200/80 overflow-hidden shadow-sm">
+        <div className="px-5 py-4 flex items-center justify-between border-b border-slate-100">
+          <SectionLabel>Live User Registry & Trust Override</SectionLabel>
+        </div>
+
         <div className="overflow-x-auto">
-          <table className="w-full text-left border-collapse">
+          <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-slate-200 text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                <th className="pb-3">User Account</th>
-                <th className="pb-3">Trust Score</th>
-                <th className="pb-3">Roles & Status</th>
-                <th className="pb-3">Available Balance</th>
-                <th className="pb-3 text-right">Admin Actions</th>
+              <tr className="text-[10px] text-slate-400 uppercase tracking-widest font-semibold border-b border-slate-100">
+                <th className="text-left px-5 py-3">User</th>
+                <th className="text-left px-4 py-3">Role</th>
+                <th className="text-left px-4 py-3">KYC</th>
+                <th className="text-left px-4 py-3">Trust</th>
+                <th className="text-left px-4 py-3 hidden md:table-cell">Balance</th>
+                <th className="text-right px-5 py-3">Admin Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 text-xs font-mono">
-              {users.map((u) => (
-                <tr key={u.id} className="hover:bg-slate-50/80 transition">
-                  <td className="py-3.5">
-                    <div className="font-bold text-slate-900">{u.name || 'Unnamed'}</div>
-                    <div className="text-[11px] text-slate-400">{u.email}</div>
-                  </td>
-                  <td className="py-3.5">
-                    <span className={`px-2 py-0.5 rounded font-bold ${u.trust_score < 50 ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-700'}`}>
-                      {u.trust_score} / 100
-                    </span>
-                  </td>
-                  <td className="py-3.5 space-x-1">
-                    {u.is_kyc_verified && <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded-full font-sans text-[10px] font-bold">KYC</span>}
-                    {u.is_lawyer && <span className="px-2 py-0.5 bg-purple-100 text-purple-800 rounded-full font-sans text-[10px] font-bold">Lawyer</span>}
-                    {!u.is_kyc_verified && !u.is_lawyer && <span className="text-slate-400 font-sans text-xs">Standard User</span>}
-                  </td>
-                  <td className="py-3.5 font-bold text-slate-700">
-                    ₦{Number(u.wallet_balance).toLocaleString()}
-                  </td>
-                  <td className="py-3.5 text-right space-x-1 font-sans">
-                    <button
-                      onClick={() => handleUserAction(u.id, 'toggle_lawyer')}
-                      disabled={!!actionLoading}
-                      className="px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded font-bold text-[11px] transition"
-                      title="Toggle verified lawyer status for arbitration"
-                    >
-                      {u.is_lawyer ? 'Revoke Lawyer' : '+ Make Lawyer'}
-                    </button>
-                    <button
-                      onClick={() => handleUserAction(u.id, 'boost_trust')}
-                      disabled={!!actionLoading}
-                      className="px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded font-bold text-[11px] transition"
-                    >
-                      +10 Trust
-                    </button>
-                    <button
-                      onClick={() => handleUserAction(u.id, 'penalize_trust')}
-                      disabled={!!actionLoading}
-                      className="px-2.5 py-1 bg-red-50 hover:bg-red-100 text-red-600 border border-red-200 rounded font-bold text-[11px] transition"
-                    >
-                      -15 Trust
-                    </button>
-                  </td>
-                </tr>
-              ))}
+            <tbody>
+              {users.map((u, i) => {
+                const isLoading = actionLoading.startsWith(u.id.toString());
+                return (
+                  <tr key={u.id} className={`border-b border-slate-50 hover:bg-slate-50/80 transition-colors ${i === users.length - 1 ? "border-none" : ""}`}>
+                    <td className="px-5 py-3.5">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-full bg-slate-100 flex items-center justify-center text-[10px] font-bold text-slate-600 flex-shrink-0 uppercase">
+                          {u.name ? u.name.slice(0, 2) : u.email.slice(0,2)}
+                        </div>
+                        <div>
+                          <p className="font-medium text-slate-800 text-xs whitespace-nowrap">{u.name || 'Unnamed'}</p>
+                          <p className="text-[10px] text-slate-400 font-mono">{u.email}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3.5">
+                      <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${
+                        u.is_lawyer ? "bg-purple-50 text-purple-700" : "bg-blue-50 text-blue-700"
+                      }`}>
+                        {u.is_lawyer ? 'Arbitrator' : 'Standard'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5">
+                      {u.is_kyc_verified
+                        ? <span className="text-emerald-600 text-[10px] font-semibold px-2 py-0.5 bg-emerald-50 rounded border border-emerald-100">✓ Verified</span>
+                        : <span className="text-amber-600 text-[10px] font-semibold">Pending</span>}
+                    </td>
+                    <td className="px-4 py-3.5">
+                      <span className={`font-mono text-xs font-bold ${
+                        u.trust_score >= 80 ? "text-emerald-700" : u.trust_score >= 50 ? "text-amber-700" : "text-red-600"
+                      }`}>
+                        {u.trust_score}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3.5 hidden md:table-cell">
+                      <span className="font-mono text-xs font-semibold text-slate-700">
+                        ₦{Number(u.wallet_balance || 0).toLocaleString()}
+                      </span>
+                    </td>
+                    <td className="px-5 py-3.5 text-right">
+                      <div className="flex items-center justify-end gap-1.5">
+                        <button
+                          onClick={() => handleUserAction(u.id, 'toggle_lawyer')}
+                          disabled={isLoading}
+                          className="text-[10px] font-semibold bg-slate-100 hover:bg-slate-200 text-slate-700 px-2 py-1.5 rounded transition-colors disabled:opacity-50"
+                        >
+                          {u.is_lawyer ? 'Revoke Lawyer' : '+ Make Lawyer'}
+                        </button>
+                        <button
+                          onClick={() => handleUserAction(u.id, 'boost_trust')}
+                          disabled={isLoading}
+                          className="text-[10px] font-semibold bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 px-2 py-1.5 rounded transition-colors disabled:opacity-50"
+                        >
+                          +10 Trust
+                        </button>
+                        <button
+                          onClick={() => handleUserAction(u.id, 'penalize_trust')}
+                          disabled={isLoading}
+                          className="text-[10px] font-semibold bg-red-50 hover:bg-red-100 text-red-700 border border-red-200 px-2 py-1.5 rounded transition-colors disabled:opacity-50"
+                        >
+                          -15 Trust
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
-
       </div>
-
     </div>
   );
 }

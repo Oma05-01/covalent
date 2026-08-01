@@ -124,6 +124,7 @@ export default function App() {
 
         {/* Navigation Tabs */}
         <div className="flex flex-wrap gap-2 border-b border-slate-200 mb-6">
+          {/* Admin / Command Center Tab */}
           {(user.is_superuser || user.is_staff) && (
             <button
               onClick={() => setActiveTab('admin_center')}
@@ -135,6 +136,7 @@ export default function App() {
             </button>
           )}
 
+          {/* Lawyer ONLY: Governance Chamber Tab */}
           {user.is_lawyer && (
             <button
               onClick={() => setActiveTab('lawyer_chamber')}
@@ -146,6 +148,7 @@ export default function App() {
             </button>
           )}
 
+          {/* Non-Lawyer ONLY: Consumer & Developer Tabs */}
           {!user.is_lawyer && (
             <>
               <button
@@ -165,26 +168,26 @@ export default function App() {
               >
                 🤖 AI Contract Builder
               </button>
+
+              <button
+                onClick={() => setActiveTab('active_deals')}
+                className={`pb-3 px-4 text-sm font-bold border-b-2 transition ${
+                  activeTab === 'active_deals' ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-700'
+                }`}
+              >
+                📦 Active Pipeline
+              </button>
+
+              <button
+                onClick={() => setActiveTab('dev_portal')}
+                className={`pb-3 px-4 text-sm font-bold border-b-2 transition ${
+                  activeTab === 'dev_portal' ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-700'
+                }`}
+              >
+                🛠️ Developer API
+              </button>
             </>
           )}
-
-          <button
-            onClick={() => setActiveTab('active_deals')}
-            className={`pb-3 px-4 text-sm font-bold border-b-2 transition ${
-              activeTab === 'active_deals' ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-700'
-            }`}
-          >
-            📦 Active Pipeline
-          </button>
-
-          <button
-            onClick={() => setActiveTab('dev_portal')}
-            className={`pb-3 px-4 text-sm font-bold border-b-2 transition ${
-              activeTab === 'dev_portal' ? 'border-slate-900 text-slate-900' : 'border-transparent text-slate-400 hover:text-slate-700'
-            }`}
-          >
-            🛠️ Developer API
-          </button>
         </div>
 
         {/* Tab Content Rendering Block */}
