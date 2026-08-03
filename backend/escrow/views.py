@@ -17,107 +17,54 @@ from accounts.media_scrubber import MediaScrubberService
 from rest_framework.parsers import MultiPartParser, FormParser
 from accounts.models import Wallet
 from accounts.serializers import ContractSerializer
-from .services import execute_dispute_consensus
+from .services import execute_dispute_consensus, withdraw_funds, deposit_funds, lock_escrow, release_escrow
+from django.core.exceptions import ValidationError
 
 class RaiseDisputeView(APIView):
-
     @transaction.atomic
-
     def post(self, request, contract_id):
-
-        contract = get_object_or_404(Contract, id=contract_id)
-
+        contract = get_object_or_404(Contract, contract_id=contract_id)
         user = request.user
-
-       
-
-        # 1. Calculate & Deduct Fee (e.g., Flat 5000 NGN)
-
+        
+        # 1. Calculate & Deduct Fee via Ledger Service
         ARBITRATION_FEE = Decimal('5000.00')
-
-        wallet = user.wallet # Assuming a OneToOne relation
-
-       
-
-        if wallet.available_balance < ARBITRATION_FEE:
-
+        
+        try:
+            withdraw_funds(user, ARBITRATION_FEE)
+        except ValidationError:
             return Response({"detail": "Insufficient funds for arbitration fee. Please fund your wallet."}, status=status.HTTP_400_BAD_REQUEST)
 
-           
-
-        wallet.available_balance -= ARBITRATION_FEE
-
-        wallet.save()
-
-
-
         # 2. Create the Dispute
-
         dispute = Dispute.objects.create(
-
             contract=contract,
-
             initiator=user,
-
             reason=request.data.get('reason', 'Standard contract dispute.')
-
         )
-
         contract.status = 'DISPUTED'
-
         contract.save()
 
-
-
         # 3. The Draft: Pick 3 Random Lawyers
-
-        # We exclude the buyer and vendor in case they happen to be registered lawyers on the platform
-
         drafted_lawyers = User.objects.filter(
-
             is_lawyer=True,
-
             is_active=True,
-
-            trust_score__gte=50 # Only draft lawyers in good standing
-
-        ).exclude(id__in=[contract.buyer.id, contract.vendor.id]).order_by('?')[:3]
-
-
+            trust_score__gte=50 
+        ).exclude(id__in=[contract.creator.id, contract.vendor.id]).order_by('?')[:3]
 
         if drafted_lawyers.count() < 3:
-
-            # Fallback if your platform is new and doesn't have 3 lawyers yet
-
             return Response({"detail": "Not enough active arbitrators on the network. Contact support."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
-
-
         for lawyer in drafted_lawyers:
-
             ArbitratorAssignment.objects.create(
-
                 dispute=dispute,
-
                 lawyer=lawyer
-
             )
 
-
-
         # 4. Log the fee deduction
-
         PlatformAuditLog.objects.create(
-
             user=user,
-
             action_type="DISPUTE_FEE_DEDUCTED",
-
             description=f"Deducted ₦5000 for Dispute #{dispute.id} initiation."
-
         )
-
-
 
         return Response({"message": "Dispute raised. 3 Arbitrators have been drafted.", "dispute_id": dispute.id})
 
@@ -138,7 +85,7 @@ class PendingAssignmentsView(APIView):
         pending = ArbitratorAssignment.objects.filter(
             lawyer=request.user,
             status='PENDING'
-        ).select_related('dispute', 'dispute__contract', 'dispute__contract__buyer', 'dispute__contract__vendor')
+        ).select_related('dispute', 'dispute__contract', 'dispute__contract__creator', 'dispute__contract__vendor')
 
         serializer = ArbitratorAssignmentSerializer(pending, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -189,7 +136,7 @@ class RespondToAssignmentView(APIView):
                 is_active=True,
                 trust_score__gte=50
             ).exclude(
-                id__in=list(already_invited_ids) + [dispute.contract.buyer_id, dispute.contract.vendor_id]
+                id__in=list(already_invited_ids) + [dispute.contract.creator_id, dispute.contract.vendor_id]
             ).order_by('?').first()
 
             if replacement_lawyer:
@@ -234,7 +181,7 @@ class ActiveDisputesView(APIView):
             id__in=accepted_dispute_ids
         ).exclude(
             id__in=voted_dispute_ids
-        ).select_related('contract', 'contract__buyer', 'contract__vendor')
+        ).select_related('contract', 'contract__creator', 'contract__vendor')
 
         serializer = DisputeSerializer(active_disputes, many=True)
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -449,18 +396,24 @@ class ContractActionView(APIView):
 
         # ACTION 3: Buyer confirms receipt (Happy Path)
         elif action == "approve":
-            # 🆕 Allow approval even if it's already DELIVERED
             if user != contract.creator or contract.status not in ["FUNDED", "IN_TRANSIT", "DELIVERED"]:
                 return Response({"detail": "Unauthorized or invalid state for approval."}, status=400)
             
             contract.status = "RELEASED"
             contract.save()
             
-            # Release funds from locked to available
-            vendor_wallet, _ = Wallet.objects.get_or_create(user__email=contract.vendor_email)
-            vendor_wallet.locked_escrow_balance -= contract.total_escrow
-            vendor_wallet.available_balance += contract.total_escrow
-            vendor_wallet.save()
+            # REPLACE THE DIRECT WALLET MATH WITH THIS:
+            try:
+                # Use our service! Moves from Buyer Locked -> Vendor Available and logs it!
+                vendor_user = User.objects.get(email=contract.vendor_email)
+                release_escrow(
+                    buyer=contract.creator, 
+                    vendor=vendor_user, 
+                    amount=contract.total_escrow, 
+                    reference=f"RELEASE_{contract.contract_id}"
+                )
+            except Exception as e:
+                return Response({"detail": str(e)}, status=400)
 
             return Response({"message": "Deal approved! Funds released to vendor."}, status=200)
 
@@ -567,15 +520,16 @@ class VerifyPaystackPaymentView(APIView):
             contract = Contract.objects.get(paystack_reference=reference)
             
             # SMART LOCALHOST VERIFICATION:
-            # If stuck in AWAITING_FUNDING (because public webhooks can't reach localhost),
-            # auto-verify the payment and lock the funds in the vendor's escrow vault!
             if contract.status == "AWAITING_FUNDING":
                 contract.status = "FUNDED"
                 contract.save()
                 
-                vendor_wallet, _ = Wallet.objects.get_or_create(user__email=contract.vendor_email)
-                vendor_wallet.locked_escrow_balance += contract.total_escrow
-                vendor_wallet.save()
+                # REPLACE THE DIRECT VENDOR WALLET MATH WITH THIS:
+                # 1. Deposit the external Paystack funds into the buyer's wallet
+                deposit_funds(contract.creator, contract.total_escrow, reference=f"PAYSTACK_{reference}")
+                
+                # 2. Immediately lock those funds in escrow
+                lock_escrow(contract.creator, contract.total_escrow, reference=f"ESCROW_{contract.contract_id}")
 
             return Response(ContractSerializer(contract).data, status=status.HTTP_200_OK)
             

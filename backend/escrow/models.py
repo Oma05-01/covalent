@@ -1,6 +1,8 @@
 from django.db import models
 from django.conf import settings
 
+from accounts.models import Wallet
+
 class DisputeEvidence(models.Model):
     FILE_TYPE_CHOICES = [
         ('IMAGE', 'Image'),
@@ -53,3 +55,20 @@ class ArbitratorAssignment(models.Model):
 
     def __str__(self):
         return f"Assignment: {self.lawyer} -> Dispute #{self.dispute.id} ({self.status})"
+
+class LedgerTransaction(models.Model):
+    TRANSACTION_TYPES = (
+        ('DEPOSIT', 'Deposit'),
+        ('WITHDRAWAL', 'Withdrawal'),
+        ('ESCROW_LOCK', 'Escrow Lock'),
+        ('ESCROW_RELEASE', 'Escrow Release'),
+    )
+    
+    wallet = models.ForeignKey(Wallet, on_delete=models.CASCADE, related_name="transactions")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    transaction_type = models.CharField(max_length=20, choices=TRANSACTION_TYPES)
+    reference = models.CharField(max_length=100, unique=True, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.transaction_type} of {self.amount} for {self.wallet.user.email}"

@@ -1,10 +1,10 @@
 from rest_framework.views import APIView
-from rest_framework import generics, status
+from rest_framework import generics, status, viewsets, permissions
 from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from rest_framework import status, permissions
-from rest_framework.decorators import api_view, permission_classes, authentication_classes
+from rest_framework.decorators import api_view, permission_classes, authentication_classes, action
 from rest_framework.permissions import AllowAny
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
@@ -14,13 +14,19 @@ import hmac
 import hashlib
 import requests
 from decimal import Decimal
+from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
 
-from .models import Wallet, Contract, CovalentUser, Dispute, DisputeEvidence, ArbitrationVote, MerchantAPIKey, PlatformAuditLog
+from .models import Wallet, Contract, CovalentUser, Dispute, MerchantAPIKey, ContractApplication
 from .serializers import (
     KYCSubmissionSerializer, UserProfileSerializer, WalletSerializer, 
-    BankResolveSerializer, BankLinkSerializer, RegistrationSerializer, ContractSerializer
+    BankResolveSerializer, BankLinkSerializer, RegistrationSerializer, ContractSerializer, ContractApplicationSerializer
 )
 from .paystack import PaystackService
+from .services import accept_contract
+
+
+User = get_user_model()
 
 
 class KYCVerificationView(APIView):
@@ -207,6 +213,87 @@ class ContractDeleteView(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
     
+
+class ContractViewSet(viewsets.ModelViewSet):
+    serializer_class = ContractSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        """Users can only see public contracts, or contracts they are a party to."""
+        user = self.request.user
+        return Contract.objects.filter(is_public=True) | \
+               Contract.objects.filter(creator=user) | \
+               Contract.objects.filter(vendor=user) | \
+               Contract.objects.filter(vendor_email=user.email)
+
+    def perform_create(self, serializer):
+        """Automatically set the creator and determine initial status."""
+        is_public = serializer.validated_data.get('is_public', False)
+        vendor_email = serializer.validated_data.get('vendor_email', None)
+        
+        vendor = None
+        if vendor_email:
+            # Try to link an existing user if the email matches
+            vendor = User.objects.filter(email=vendor_email).first()
+            
+        initial_status = "OPEN" if is_public else "PROPOSED"
+        
+        serializer.save(
+            creator=self.request.user, 
+            vendor=vendor,
+            status=initial_status
+        )
+
+    @action(detail=True, methods=['post'])
+    def apply(self, request, pk=None):
+        """Allows a vendor to bid on an OPEN contract."""
+        contract = self.get_object()
+        
+        if contract.status != "OPEN":
+            return Response({"error": "This contract is not open for bids."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        serializer = ContractApplicationSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save(contract=contract, applicant=request.user)
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def accept_application(self, request, pk=None):
+        """Allows a buyer to accept a vendor's bid."""
+        contract = self.get_object()
+        application_id = request.data.get('application_id')
+        
+        if contract.creator != request.user:
+            return Response({"error": "Only the creator can accept bids."}, status=status.HTTP_403_FORBIDDEN)
+            
+        application = get_object_or_404(ContractApplication, id=application_id, contract=contract)
+        
+        # Use our service to lock the contract state
+        accept_contract(contract=contract, vendor=application.applicant)
+        
+        # Update application statuses
+        application.status = "ACCEPTED"
+        application.save()
+        contract.applications.exclude(id=application.id).update(status="REJECTED")
+        
+        return Response({"status": "Contract locked and vendor assigned."}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Allows a targeted vendor to reject a direct proposal."""
+        contract = self.get_object()
+        
+        if contract.vendor != request.user and contract.vendor_email != request.user.email:
+            return Response({"error": "You are not the targeted vendor."}, status=status.HTTP_403_FORBIDDEN)
+            
+        if contract.status != "PROPOSED":
+            return Response({"error": "Only proposed contracts can be rejected."}, status=status.HTTP_400_BAD_REQUEST)
+            
+        contract.status = "REJECTED"
+        contract.save()
+        return Response({"status": "Contract rejected."}, status=status.HTTP_200_OK)
+
 
 class PlatformAdminDashboardView(APIView):
     permission_classes = [permissions.IsAuthenticated]

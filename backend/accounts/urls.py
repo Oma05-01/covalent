@@ -1,11 +1,15 @@
-from django.urls import path
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 from .views import (
     ContractDeleteView, DevKeysView, KYCVerificationView, RegistrationView, UserProfileView, BankListView, 
-    ResolveAccountView, LinkBankView, WalletDashboardView,
+    ResolveAccountView, LinkBankView, WalletDashboardView,ContractViewSet,
     paystack_webhook,
      PlatformAdminDashboardView, AdminUserManagementView,
 )
+
+router = DefaultRouter()
+router.register(r'contracts', ContractViewSet, basename='contract')
 
 urlpatterns = [
     # Auth & Profile
@@ -24,6 +28,7 @@ urlpatterns = [
     # Phase 3 & 4: Contracts, Payments, Webhook & Fulfillment
     path('webhook/paystack/', paystack_webhook, name='paystack_webhook'),
     path('contracts/<uuid:contract_id>/delete/', ContractDeleteView.as_view(), name='contract-delete'),
+    path('', include(router.urls)),
 
     
     # Phase 7: Admin & Revenue Command Center

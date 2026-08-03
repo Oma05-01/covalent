@@ -16,20 +16,24 @@ from .views import (
 app_name = 'escrow'
 
 urlpatterns = [
-    # Contracts & Escrow Payments
+    # 1. Standard Endpoints (Put these first so they don't get caught by wildcards)
     path('contracts/', UserContractsListView.as_view(), name='user-contracts'),
     path('contracts/generate/', GenerateContractView.as_view(), name='generate-contract'),
-    path('contracts/<int:contract_id>/action/', ContractActionView.as_view(), name='contract-action'),
-    path('contracts/<int:contract_id>/pay/', InitializeEscrowPaymentView.as_view(), name='init-payment'),
     path('payments/verify/', VerifyPaystackPaymentView.as_view(), name='verify-payment'),
     
-    # Dispute Initiation & Evidence
-    path('contracts/<int:contract_id>/dispute/', RaiseDisputeView.as_view(), name='raise-dispute'),
-    path('disputes/<int:dispute_id>/evidence/', DisputeEvidenceUploadView.as_view(), name='upload-evidence'),
-
-    # Arbitration & Lawyer Dashboard
+    # 2. Specific Contract Actions
+    path('contracts/<str:contract_id>/pay/', InitializeEscrowPaymentView.as_view(), name='init-payment'),
+    path('contracts/<str:contract_id>/dispute/', RaiseDisputeView.as_view(), name='raise-dispute'),
+    
+    # 3. Dynamic Contract Actions (The wildcard MUST go last in the contracts section)
+    path('contracts/<str:contract_id>/<str:action>/', ContractActionView.as_view(), name='contract-action'),
+    
+    # 4. Disputes & Lawyer Dashboard
     path('disputes/active/', ActiveDisputesView.as_view(), name='active-disputes'),
+    path('disputes/<int:dispute_id>/evidence/', DisputeEvidenceUploadView.as_view(), name='upload-evidence'),
     path('disputes/<int:pk>/vote/', CastArbitrationVoteView.as_view(), name='dispute-vote'),
+    
+    # 5. Assignments
     path('assignments/pending/', PendingAssignmentsView.as_view(), name='pending-assignments'),
     path('assignments/<int:pk>/respond/', RespondToAssignmentView.as_view(), name='respond-assignment'),
 ]

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Wallet, Contract, Dispute, DisputeEvidence, ArbitrationVote
+from .models import Wallet, Contract, Dispute, DisputeEvidence, ArbitrationVote, ContractApplication
 
 User = get_user_model()
 
@@ -42,23 +42,6 @@ class BankResolveSerializer(serializers.Serializer):
 class BankLinkSerializer(BankResolveSerializer):
     bank_name = serializers.CharField(max_length=100)
     account_name = serializers.CharField(max_length=150)
-
-
-class ContractSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Contract
-        fields = [
-            'contract_id', 'paystack_reference', 'vendor_email', 
-            'item_title', 'item_description', 'item_amount', 
-            'delivery_fee', 'total_escrow', 'status', 'created_at',
-            'inspection_period_hours', 'delivered_at', 'auto_release_at' # 🆕 Added
-        ]
-        
-        # Make sure users can't artificially alter the timer or status
-        read_only_fields = [
-            'contract_id', 'paystack_reference', 'total_escrow', 
-            'status', 'created_at', 'delivered_at', 'auto_release_at'
-        ]
 
 
 class AnonymizedEvidenceSerializer(serializers.ModelSerializer):
@@ -107,3 +90,51 @@ class RegistrationSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         # Use create_user to ensure the password gets hashed!
         return User.objects.create_user(**validated_data)
+
+
+class ContractApplicationSerializer(serializers.ModelSerializer):
+    applicant_name = serializers.CharField(source='applicant.get_full_name', read_only=True)
+    
+    class Meta:
+        model = ContractApplication
+        fields = ['id', 'contract', 'applicant', 'applicant_name', 'cover_message', 'proposed_amount', 'status', 'created_at']
+        read_only_fields = ['id', 'contract', 'applicant', 'status', 'created_at']
+
+
+class ContractSerializer(serializers.ModelSerializer):
+    creator_name = serializers.CharField(source='creator.get_full_name', read_only=True)
+    applications = ContractApplicationSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Contract
+        fields = [
+            # Identity & Routing
+            'contract_id', 'creator', 'creator_name', 'vendor', 'vendor_email', 
+            'is_public', 
+            
+            # Terms & Money
+            'item_title', 'item_description', 'item_amount', 
+            'delivery_fee', 'total_escrow', 'paystack_reference',
+            
+            # Lifecycle & Time
+            'status', 'applications', 'created_at',
+            'inspection_period_hours', 'delivered_at', 'auto_release_at'
+        ]
+        
+        # Ensure system-managed fields cannot be tampered with via API requests
+        read_only_fields = [
+            'contract_id', 'creator', 'vendor', 'total_escrow', 'status', 
+            'created_at', 'delivered_at', 'auto_release_at', 'paystack_reference'
+        ]
+
+    def validate(self, attrs):
+        """Model-level validation rules run during serializer validation."""
+        is_public = attrs.get('is_public', False)
+        vendor_email = attrs.get('vendor_email', None)
+        
+        # If it is a private direct contract, a vendor email must be provided
+        if not is_public and not vendor_email:
+            raise serializers.ValidationError({
+                "vendor_email": "A vendor email must be provided for private contracts."
+            })
+        return attrs
