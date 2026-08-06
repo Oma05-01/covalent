@@ -10,7 +10,8 @@ from .views import (
     PendingAssignmentsView,
     RespondToAssignmentView,
     ActiveDisputesView,
-    CastArbitrationVoteView
+    CastArbitrationVoteView,
+    DisputeDetailView,
 )
 
 app_name = 'escrow'
@@ -36,4 +37,6 @@ urlpatterns = [
     # 5. Assignments
     path('assignments/pending/', PendingAssignmentsView.as_view(), name='pending-assignments'),
     path('assignments/<int:pk>/respond/', RespondToAssignmentView.as_view(), name='respond-assignment'),
+
+    path('disputes/<int:id>/', DisputeDetailView.as_view(), name='dispute-detail'),
 ]

@@ -5,6 +5,8 @@ from datetime import timedelta
 from accounts.models import PlatformAuditLog
 from .models import Wallet, LedgerTransaction
 from django.core.exceptions import ValidationError
+from governance.services import process_governance_event
+from governance.models import TrustLog
 
 @transaction.atomic
 def execute_dispute_consensus(dispute):
@@ -20,7 +22,8 @@ def execute_dispute_consensus(dispute):
     
     contract = dispute.contract
     escrow_amount = contract.total_escrow
-    TRUST_SCORE_PENALTY = 15 # Severe penalty for losing arbitration
+    TRUST_SCORE_PENALTY = -15 # Severe penalty for losing arbitration
+    TRUST_SCORE_BUMP = 2      # Small reward for being in the right
 
     # Execute Payout & Apply Penalties
     if winner == 'buyer':
@@ -30,14 +33,20 @@ def execute_dispute_consensus(dispute):
         wallet.save()
         contract.status = 'REFUNDED'
         
-        # 🆕 Apply the Vendor Penalty
-        contract.vendor.trust_score -= TRUST_SCORE_PENALTY
-        contract.vendor.save()
-        
-        PlatformAuditLog.objects.create(
+        # 🆕 Apply Governance updates via the Service Layer
+        process_governance_event(
             user=contract.vendor,
-            action_type="TRUST_SCORE_SLASHED",
-            description=f"Lost dispute #{dispute.id}. Deducted {TRUST_SCORE_PENALTY} points."
+            event_type=TrustLog.EventType.DISPUTE_LOST,
+            trust_impact=TRUST_SCORE_PENALTY,
+            reference_id=dispute.id,
+            description=f"Lost dispute #{dispute.id} as Vendor."
+        )
+        process_governance_event(
+            user=contract.creator,
+            event_type=TrustLog.EventType.DISPUTE_WON,
+            trust_impact=TRUST_SCORE_BUMP,
+            reference_id=dispute.id,
+            description=f"Won dispute #{dispute.id} as Buyer."
         )
         
     else:
@@ -47,14 +56,20 @@ def execute_dispute_consensus(dispute):
         wallet.save()
         contract.status = 'COMPLETED'
         
-        # 🆕 Apply the Buyer Penalty
-        contract.creator.trust_score -= TRUST_SCORE_PENALTY
-        contract.creator.save()
-        
-        PlatformAuditLog.objects.create(
+        # 🆕 Apply Governance updates via the Service Layer
+        process_governance_event(
             user=contract.creator,
-            action_type="TRUST_SCORE_SLASHED",
-            description=f"Lost dispute #{dispute.id} (False Claim). Deducted {TRUST_SCORE_PENALTY} points."
+            event_type=TrustLog.EventType.DISPUTE_LOST,
+            trust_impact=TRUST_SCORE_PENALTY,
+            reference_id=dispute.id,
+            description=f"Lost dispute #{dispute.id} as Buyer (False Claim)."
+        )
+        process_governance_event(
+            user=contract.vendor,
+            event_type=TrustLog.EventType.DISPUTE_WON,
+            trust_impact=TRUST_SCORE_BUMP,
+            reference_id=dispute.id,
+            description=f"Won dispute #{dispute.id} as Vendor."
         )
 
     # Distribute Arbitration Fees to Lawyers
@@ -128,7 +143,7 @@ def lock_escrow(user, amount, reference=None):
 
 @transaction.atomic
 def release_escrow(buyer, vendor, amount, reference=None):
-    """Releases locked buyer funds into the vendor's available balance."""
+    """Releases locked buyer funds into the vendor's available balance and applies governance rewards."""
     buyer_wallet = Wallet.objects.select_for_update().get(user=buyer)
     vendor_wallet = Wallet.objects.select_for_update().get(user=vendor)
     
@@ -151,6 +166,26 @@ def release_escrow(buyer, vendor, amount, reference=None):
     tx_credit = LedgerTransaction.objects.create(
         wallet=vendor_wallet, amount=amount, transaction_type="DEPOSIT", 
         reference=f"{reference}_cred" if reference else None
+    )
+    
+    # 👇 NEW: Reward both parties for a clean, successful transaction
+    # We use the transaction reference (typically the contract_id) as the reference_id
+    process_governance_event(
+        user=vendor,
+        event_type=TrustLog.EventType.CONTRACT_SUCCESS,
+        trust_impact=5,      # Vendor gets a solid trust bump for delivering successfully
+        loyalty_impact=10,   # Loyalty points for platform usage
+        reference_id=reference if reference else "",
+        description="Successfully delivered and released contract."
+    )
+
+    process_governance_event(
+        user=buyer,
+        event_type=TrustLog.EventType.CONTRACT_SUCCESS,
+        trust_impact=2,      # Buyer gets a smaller trust bump for a smooth transaction
+        loyalty_impact=10,   # Loyalty points for platform usage
+        reference_id=reference if reference else "",
+        description="Successfully completed contract as Buyer."
     )
     
     return buyer_wallet, vendor_wallet, [tx_debit, tx_credit]

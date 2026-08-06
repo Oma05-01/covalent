@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from .models import ArbitratorAssignment
-from accounts.models import Dispute, Contract
+from accounts.models import Dispute, Contract, DisputeEvidence
 
 
 class ContractNestedSerializer(serializers.ModelSerializer):
@@ -51,3 +51,22 @@ class ArbitratorAssignmentSerializer(serializers.ModelSerializer):
             'status',
             'assigned_at'
         ]
+
+
+class AnonymousDisputeSerializer(serializers.ModelSerializer):
+    initiator_alias = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = Dispute
+        fields = ['id', 'reason', 'status', 'initiator_alias']
+        # Notice we omit the actual initiator object/email!
+        
+    def get_initiator_alias(self, obj):
+        return "Party A" if obj.initiator == obj.contract.creator else "Party B"
+
+
+class DisputeEvidenceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = DisputeEvidence
+        fields = ['id', 'dispute', 'uploader', 'original_file', 'file_type', 'created_at']
+        read_only_fields = ['dispute', 'uploader']

@@ -11,11 +11,17 @@ export default function AIContractBuilder({ onContractFunded }) {
   const [contract, setContract] = useState(null);
   const [paying, setPaying] = useState(false);
 
+  // Field-level Editing State
+  const [isEditing, setIsEditing] = useState(false);
+  const [editFormData, setEditFormData] = useState({});
+  const [savingEdits, setSavingEdits] = useState(false);
+
   const handleGenerate = async (e) => {
     e.preventDefault();
     setLoading(true);
     setError('');
     setContract(null);
+    setIsEditing(false);
 
     try {
       const res = await api.post('contracts/generate/', {
@@ -23,10 +29,40 @@ export default function AIContractBuilder({ onContractFunded }) {
         vendor_email: vendorEmail
       });
       setContract(res.data);
+      // Pre-fill the edit form with the exact terms returned by the AI
+      setEditFormData(res.data.terms);
     } catch (err) {
       setError(err.response?.data?.detail || 'Failed to generate contract.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleSaveEdits = async () => {
+    setSavingEdits(true);
+    setError('');
+    try {
+      // Send a PATCH request to update only the changed fields
+      await api.patch(`contracts/${contract.contract_id}/`, {
+        item_title: editFormData.item_title,
+        item_description: editFormData.item_description,
+        item_amount: editFormData.item_amount,
+        delivery_fee: editFormData.delivery_fee,
+        delivery_days: editFormData.delivery_days
+      });
+      
+      // Update the local React state with the new values
+      const newTotalEscrow = Number(editFormData.item_amount) + Number(editFormData.delivery_fee);
+      setContract({
+        ...contract,
+        terms: editFormData,
+        total_escrow: newTotalEscrow
+      });
+      setIsEditing(false);
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Failed to update contract terms.');
+    } finally {
+      setSavingEdits(false);
     }
   };
 
@@ -109,15 +145,101 @@ export default function AIContractBuilder({ onContractFunded }) {
             )}
           </button>
         </form>
+      ) : isEditing ? (
+        
+        /* ------------------------------------------------ */
+        /* FIELD-LEVEL EDITING FORM                         */
+        /* ------------------------------------------------ */
+        <div className="border-2 border-slate-900 rounded-xl p-5 bg-white space-y-4 animate-in fade-in duration-200">
+          <h3 className="font-bold text-lg text-slate-900 border-b border-slate-200 pb-2">Edit Contract Terms</h3>
+          
+          <div className="space-y-3">
+            <div>
+              <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Item Title</label>
+              <input 
+                value={editFormData.item_title}
+                onChange={(e) => setEditFormData({...editFormData, item_title: e.target.value})}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-900 outline-none text-slate-900"
+              />
+            </div>
+            
+            <div>
+              <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Specifications</label>
+              <textarea 
+                rows="2"
+                value={editFormData.item_description}
+                onChange={(e) => setEditFormData({...editFormData, item_description: e.target.value})}
+                className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-900 outline-none text-slate-900 text-sm"
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-4">
+              <div className="col-span-1">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Amount (₦)</label>
+                <input 
+                  type="number"
+                  value={editFormData.item_amount}
+                  onChange={(e) => setEditFormData({...editFormData, item_amount: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-900 outline-none text-slate-900"
+                />
+              </div>
+              <div className="col-span-1">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Delivery (₦)</label>
+                <input 
+                  type="number"
+                  value={editFormData.delivery_fee}
+                  onChange={(e) => setEditFormData({...editFormData, delivery_fee: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-900 outline-none text-slate-900"
+                />
+              </div>
+              <div className="col-span-1">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">Days</label>
+                <input 
+                  type="number"
+                  value={editFormData.delivery_days}
+                  onChange={(e) => setEditFormData({...editFormData, delivery_days: e.target.value})}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:ring-2 focus:ring-slate-900 outline-none text-slate-900"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="flex gap-3 pt-3">
+            <button 
+              onClick={() => setIsEditing(false)}
+              className="px-4 py-2.5 text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg font-bold transition"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={handleSaveEdits}
+              disabled={savingEdits}
+              className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg font-bold transition flex-1"
+            >
+              {savingEdits ? 'Saving Updates...' : 'Save Updates'}
+            </button>
+          </div>
+        </div>
+
       ) : (
-        /* Contract Summary Card */
+        /* ------------------------------------------------ */
+        /* SUMMARY CARD                                     */
+        /* ------------------------------------------------ */
         <div className="border-2 border-slate-900 rounded-xl p-5 bg-slate-50 space-y-4 animate-in fade-in duration-200">
           <div className="flex justify-between items-start border-b border-slate-200 pb-3">
             <div>
               <span className="text-xs font-bold bg-slate-900 text-white px-2 py-0.5 rounded uppercase">AI Drafted Deal</span>
               <h3 className="text-lg font-bold text-slate-900 mt-1">{contract.terms.item_title}</h3>
             </div>
-            <button onClick={() => setContract(null)} className="text-xs text-slate-500 underline hover:text-slate-800">Edit Text</button>
+            <div className="flex flex-col items-end gap-2">
+               <button onClick={() => setIsEditing(true)} className="text-xs font-bold text-blue-600 hover:text-blue-800 hover:underline">
+                 Edit Fields
+               </button>
+               {/* Note: Assuming you have a handle API call to actually delete the contract in your delete button */}
+               <button onClick={() => setContract(null)} className="text-xs text-red-500 hover:text-red-700 hover:underline">
+                 Discard Draft
+               </button>
+            </div>
           </div>
 
           <div className="space-y-2 text-sm text-slate-700">

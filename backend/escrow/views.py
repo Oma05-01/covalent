@@ -11,7 +11,7 @@ from rest_framework import status, permissions
 from accounts.ai_contract import AIContractService
 from decimal import Decimal
 from .models import ArbitratorAssignment
-from .serializers import DisputeSerializer, ArbitratorAssignmentSerializer
+from .serializers import DisputeSerializer, ArbitratorAssignmentSerializer, AnonymousDisputeSerializer
 from accounts.models import CovalentUser as User, Dispute, ArbitrationVote, PlatformAuditLog, Contract, DisputeEvidence
 from accounts.media_scrubber import MediaScrubberService
 from rest_framework.parsers import MultiPartParser, FormParser
@@ -19,6 +19,11 @@ from accounts.models import Wallet
 from accounts.serializers import ContractSerializer
 from .services import execute_dispute_consensus, withdraw_funds, deposit_funds, lock_escrow, release_escrow
 from django.core.exceptions import ValidationError
+from rest_framework.generics import RetrieveAPIView
+
+from governance.risk_engine import RiskMitigationEngine
+from governance.telemetry import gather_request_telemetry
+from governance.models import GovernanceProfile
 
 class RaiseDisputeView(APIView):
     @transaction.atomic
@@ -289,9 +294,29 @@ class CastArbitrationVoteView(APIView):
 class InitializeEscrowPaymentView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
-    def post(self, request):
+    def post(self, request, contract_id):
         from accounts.models import CovalentUser
-        contract_id = request.data.get("contract_id")
+        
+        # =====================================================================
+        # 1. RISK MITIGATION & TELEMETRY CHECK
+        # =====================================================================
+        # Harvest intelligence (IP address, velocity limits, etc.)
+        telemetry = gather_request_telemetry(request, request.user, action="initialize_escrow")
+        
+        # Feed it to the SwapGuard Risk Engine
+        profile, risk_added = RiskMitigationEngine.evaluate_transaction_risk(
+            user=request.user, 
+            telemetry_data=telemetry,
+            request=request
+        )
+        
+        # Immediate Kill-Switch Enforcement
+        if profile.status == GovernanceProfile.AccountStatus.SUSPENDED:
+            return Response(
+                {"detail": "Action blocked: Account suspended due to critical security risk."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+        # =====================================================================
         
         try:
             contract = Contract.objects.get(contract_id=contract_id, creator=request.user)
@@ -324,6 +349,7 @@ class InitializeEscrowPaymentView(APIView):
             "Authorization": f"Bearer {settings.PAYSTACK_SECRET_KEY}", 
             "Content-Type": "application/json"
         }
+        
         payload = {
             "email": request.user.email,
             "amount": int(contract.total_escrow * 100),  # Amount in kobo
@@ -347,7 +373,6 @@ class InitializeEscrowPaymentView(APIView):
             {"detail": f"Paystack Error: {error_data.get('message', 'Unknown error')}"}, 
             status=status.HTTP_400_BAD_REQUEST
         )
-
 
 class ContractActionView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -536,3 +561,8 @@ class VerifyPaystackPaymentView(APIView):
         except Contract.DoesNotExist:
             return Response({"detail": "Contract with this reference not found."}, status=status.HTTP_404_NOT_FOUND)
         
+
+class DisputeDetailView(RetrieveAPIView):
+    queryset = Dispute.objects.all()
+    serializer_class = AnonymousDisputeSerializer
+    lookup_field = 'id'

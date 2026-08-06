@@ -3,6 +3,8 @@ from django.contrib.auth import get_user_model
 from .models import Wallet, Contract, Dispute, DisputeEvidence, ArbitrationVote, ContractApplication
 
 User = get_user_model()
+CovalentUser = get_user_model()
+
 
 class UserProfileSerializer(serializers.ModelSerializer):
     trust_tier = serializers.CharField(source='get_trust_tier_display', read_only=True)
@@ -114,23 +116,26 @@ class ContractSerializer(serializers.ModelSerializer):
             
             # Terms & Money
             'item_title', 'item_description', 'item_amount', 
-            'delivery_fee', 'total_escrow', 'paystack_reference',
+            'delivery_fee', 'delivery_days', 'total_escrow', 'paystack_reference',
             
             # Lifecycle & Time
-            'status', 'applications', 'created_at',
+            'status', 'applications', 'created_at', 'plain_language_summary',
             'inspection_period_hours', 'delivered_at', 'auto_release_at'
         ]
         
         # Ensure system-managed fields cannot be tampered with via API requests
         read_only_fields = [
             'contract_id', 'creator', 'vendor', 'total_escrow', 'status', 
-            'created_at', 'delivered_at', 'auto_release_at', 'paystack_reference'
+            'created_at', 'delivered_at', 'auto_release_at', 'paystack_reference',
+            'plain_language_summary' # Keep the AI's safety summary read-only
         ]
 
     def validate(self, attrs):
         """Model-level validation rules run during serializer validation."""
-        is_public = attrs.get('is_public', False)
-        vendor_email = attrs.get('vendor_email', None)
+        
+        # FIX: For PATCH requests, fall back to the existing instance's values
+        is_public = attrs.get('is_public', self.instance.is_public if self.instance else False)
+        vendor_email = attrs.get('vendor_email', self.instance.vendor_email if self.instance else None)
         
         # If it is a private direct contract, a vendor email must be provided
         if not is_public and not vendor_email:
@@ -138,3 +143,24 @@ class ContractSerializer(serializers.ModelSerializer):
                 "vendor_email": "A vendor email must be provided for private contracts."
             })
         return attrs
+
+
+class AdminUserListSerializer(serializers.ModelSerializer):
+    name = serializers.SerializerMethodField()
+    wallet_balance = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CovalentUser
+        fields = [
+            'id', 'email', 'name', 'trust_score', 
+            'is_kyc_verified', 'is_lawyer', 'is_active', 'wallet_balance'
+        ]
+
+    def get_name(self, obj):
+        return f"{obj.first_name} {obj.last_name}"
+
+    def get_wallet_balance(self, obj):
+        try:
+            return obj.wallet.available_balance
+        except AttributeError:
+            return 0

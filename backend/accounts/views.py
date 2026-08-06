@@ -1,11 +1,11 @@
 from rest_framework.views import APIView
 from rest_framework import generics, status, viewsets, permissions
-from rest_framework.permissions import AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
-from rest_framework import status, permissions
 from rest_framework.decorators import api_view, permission_classes, authentication_classes, action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
+from .permissions import IsRiskOfficer
+from governance.permissions import IsAccountInGoodStanding
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 from django.db.models import Sum, Avg
@@ -16,14 +16,21 @@ import requests
 from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
+from audit.services import AuditLogger
+from audit.models import AdminActionType
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.filters import SearchFilter, OrderingFilter
+from django_filters.rest_framework import DjangoFilterBackend
 
 from .models import Wallet, Contract, CovalentUser, Dispute, MerchantAPIKey, ContractApplication
 from .serializers import (
     KYCSubmissionSerializer, UserProfileSerializer, WalletSerializer, 
-    BankResolveSerializer, BankLinkSerializer, RegistrationSerializer, ContractSerializer, ContractApplicationSerializer
+    BankResolveSerializer, BankLinkSerializer, RegistrationSerializer, 
+    ContractSerializer, ContractApplicationSerializer, AdminUserListSerializer
 )
 from .paystack import PaystackService
 from .services import accept_contract
+from .ai_contract import AIContractService
 
 
 User = get_user_model()
@@ -218,6 +225,19 @@ class ContractViewSet(viewsets.ModelViewSet):
     serializer_class = ContractSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_permissions(self):
+        """
+        Instantiates and returns the list of permissions that this view requires.
+        """
+        # Apply the restriction only to contract creation
+        if self.action == 'create':
+            permission_classes = [IsAuthenticated, IsAccountInGoodStanding]
+        else:
+            # For reading, listing, or updating (if allowed), basic auth is enough
+            permission_classes = [IsAuthenticated]
+            
+        return [permission() for permission in permission_classes]
+
     def get_queryset(self):
         """Users can only see public contracts, or contracts they are a party to."""
         user = self.request.user
@@ -294,6 +314,70 @@ class ContractViewSet(viewsets.ModelViewSet):
         contract.save()
         return Response({"status": "Contract rejected."}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['post'], url_path='generate-ai-draft')
+    def generate_ai_draft(self, request):
+        """
+        Takes a natural language negotiation prompt, parses it via Gemini,
+        and returns structured contract data for human review/editing.
+        """
+        prompt = request.data.get('prompt')
+        if not prompt:
+            return Response(
+                {"error": "A natural language 'prompt' is required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 1. Parse prompt into structured JSON via AI service
+        ai_service = AIContractService()
+        parsed_terms = ai_service.parse_contract_prompt(prompt)
+
+        # 2. Return parsed terms directly so the frontend/human can review & edit
+        return Response(parsed_terms, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['post'], url_path='generate')
+    def generate(self, request):
+        """
+        Matches the React AIContractBuilder frontend.
+        POST /api/contracts/generate/
+        """
+        prompt = request.data.get('prompt')
+        vendor_email = request.data.get('vendor_email')
+
+        if not prompt or not vendor_email:
+            return Response(
+                {"detail": "Both 'prompt' and 'vendor_email' are required."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 1. Parse prompt into structured JSON via AI service
+        ai_service = AIContractService()
+        try:
+            parsed_terms = ai_service.parse_contract_prompt(prompt)
+        except Exception as e:
+            return Response({"detail": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        # 2. Save the contract directly to the database
+        contract = Contract.objects.create(
+            creator=request.user,
+            vendor_email=vendor_email,
+            status="PROPOSED",
+            item_title=parsed_terms.get('item_title'),
+            item_description=parsed_terms.get('item_description'),
+            item_amount=parsed_terms.get('item_amount'),
+            delivery_fee=parsed_terms.get('delivery_fee'),
+            delivery_days=parsed_terms.get('delivery_days'),
+            plain_language_summary=parsed_terms.get('plain_language_summary')
+        )
+
+        # 3. Calculate total for the frontend UI
+        total_escrow = float(contract.item_amount) + float(contract.delivery_fee)
+
+        # 4. Return the exact structure the React component expects
+        return Response({
+            "contract_id": contract.contract_id, # Or contract.contract_id if you use UUIDs
+            "terms": parsed_terms,
+            "total_escrow": total_escrow
+        }, status=status.HTTP_201_CREATED)
 
 class PlatformAdminDashboardView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -333,39 +417,39 @@ class PlatformAdminDashboardView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-class AdminUserManagementView(APIView):
-    permission_classes = [permissions.IsAuthenticated]
+class StandardAdminPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
-    def get(self, request):
+class AdminUserManagementView(generics.ListAPIView):
+    permission_classes = [permissions.IsAuthenticated]
+    
+    # Let DRF handle the querying, filtering, and ordering
+    queryset = CovalentUser.objects.all().order_by('-date_joined')
+    serializer_class = AdminUserListSerializer
+    pagination_class = StandardAdminPagination
+    
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['is_active', 'is_lawyer']
+    search_fields = ['email', 'first_name', 'last_name']
+
+    def get(self, request, *args, **kwargs):
+        # 1. Keep your original security check
         if not (request.user.is_superuser or request.user.is_staff):
             return Response({"detail": "Access denied."}, status=403)
             
-        users = CovalentUser.objects.all().order_by('-date_joined')[:20]
-        data = []
-        for u in users:
-            # Safely get the wallet balance
-            balance = 0
-            try:
-                # This now works because of the related_name="wallet" fix
-                balance = u.wallet.available_balance 
-            except AttributeError:
-                balance = 0
-                
-            data.append({
-                "id": u.id,
-                "email": u.email,
-                "name": f"{u.first_name} {u.last_name}",
-                "trust_score": u.trust_score,
-                "is_kyc_verified": u.is_kyc_verified,
-                "is_lawyer": u.is_lawyer,
-                "is_active": u.is_active,
-                "wallet_balance": balance,
-            })
-        return Response(data, status=200)
+        # 2. Let ListAPIView handle the pagination, filtering, and serialization
+        return super().get(request, *args, **kwargs)
 
-    def patch(self, request, user_id):
+    def patch(self, request, user_id=None):
+        # Keep your exact original patch logic untouched
         if not (request.user.is_superuser or request.user.is_staff):
             return Response({"detail": "Access denied."}, status=403)
+            
+        # Fallback if user_id is passed in body instead of URL for the 'action' route
+        if not user_id:
+            user_id = request.data.get("user_id")
             
         try:
             target_user = CovalentUser.objects.get(id=user_id)
@@ -390,7 +474,7 @@ class AdminUserManagementView(APIView):
             return Response({"message": f"Trust score penalized to {target_user.trust_score}"})
 
         return Response({"detail": "Invalid action."}, status=400)
-    
+       
 def trigger_merchant_webhook(contract, event_type):
     # This logic would be called by your Celery worker 
     # when contract.status changes
@@ -414,3 +498,50 @@ class DevKeysView(APIView):
     def post(self, request):
         key = MerchantAPIKey.objects.create(user=request.user, name=request.data.get('name'))
         return Response({'id': key.id, 'name': key.name, 'key': key.key})
+
+    
+class SuspendUserView(APIView):
+    """
+    Suspends a user account and logs the action immutably.
+    Requires Risk Officer or Super Admin privileges.
+    """
+    permission_classes = [IsRiskOfficer]
+
+    def post(self, request, user_id):
+        target_user = get_object_or_404(User, id=user_id)
+        justification = request.data.get('justification')
+
+        if not justification:
+            return Response(
+                {"error": "A justification must be provided to suspend a user."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not target_user.is_active:
+            return Response(
+                {"error": "User is already suspended."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Capture state for the audit log
+        previous_state = {"is_active": target_user.is_active}
+        
+        # Suspend the user
+        target_user.is_active = False
+        target_user.save(update_fields=['is_active'])
+
+        # Log the immutable action
+        AuditLogger.log_admin_action(
+            admin=request.user,
+            action_type=AdminActionType.SUSPEND_USER,
+            target=target_user,
+            justification=justification,
+            previous_state=previous_state,
+            new_state={"is_active": False},
+            ip_address=request.META.get('REMOTE_ADDR')
+        )
+
+        return Response(
+            {"message": f"User {target_user.email} has been suspended."},
+            status=status.HTTP_200_OK
+        )

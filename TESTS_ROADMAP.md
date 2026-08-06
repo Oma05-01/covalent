@@ -168,8 +168,112 @@ Validates the complete user workflow from dispatch to settlement.
         3. Client reviews and approves work within the window.
         4. Contract transitions to `"RELEASED"` and escrow funds transfer directly to the vendor's available balance.
 
----
 
-## 3. Test Execution Command
+# Phase 5 — Dispute Resolution
 
-To run the complete Phase 4 test suite, execute the following command from your backend root directory:
+**Goal:** Conflict resolution is fair, anonymous, and strictly adheres to the decentralized arbitration protocols.
+
+### Unit Tests
+- [x] **7-to-30-day timer respected:** Ensures disputes can only be raised within the valid timeframe.
+- [x] **Evidence scrubbed for anonymity:** Verifies that uploaded files (`DisputeEvidence`) are passed through the `media_scrubber` to strip metadata before saving.
+- [x] **Fee calculations:** Confirms the ₦5000 non-refundable support fee is correctly calculated and applied.
+
+### Integration Tests
+- [x] **Lawyers and parties are anonymous:** Validates that the API correctly masks the identities of the buyer and vendor (e.g., as "Party A" and "Party B") when serving data to the assigned lawyers.
+- [x] **Raise dispute deducts support fee and locks state:** Ensures that initiating a dispute successfully transitions the contract state to `DISPUTED` and deducts the required operational fee.
+
+### E2E Test
+- [x] **Full Dispute Lifecycle:** Simulates the complete end-to-end flow:
+  1. Dispute Raised (Timer & Fee Validation)
+  2. Evidence Uploaded (Anonymization Triggered)
+  3. Arbitrators Assigned & Accepted
+  4. Voting Consensus Reached (Minimum 80-character justification enforced)
+  5. Payout & Contract State Transited (`REFUNDED` or `RELEASED`)
+
+
+# Phase 6 — Trust & Governance
+
+**Goal:** Accountability is enforced across the platform through automated scoring, penalties, and progressive restrictions.
+
+### Unit Tests
+- [X] **Trust Score changes:** Verify exact mathematical adjustments to a user's trust rating.
+- [X] **Loyalty points:** Ensure successful transactions accurately accrue loyalty points.
+- [X] **Penalty engine:** Validate the point deduction logic for infractions.
+- [X] **Warning engine:** Confirm that dropping below specific thresholds triggers the correct account flags.
+
+### Integration Tests
+- [X] **Dispute affects trust:** Ensure losing a dispute automatically triggers the penalty engine.
+- [X] **Clean contracts improve trust:** Verify that completing contracts without disputes integrates with the trust score increment logic.
+- [X] **Loyalty updates:** Confirm database state changes when loyalty tiers are crossed.
+
+### E2E Test
+- [X] **The "Bad Actor" Pipeline:**
+      Repeated bad behavior ➔ Warning ➔ Restriction ➔ Suspension.
+
+### Business Rule Tests
+- [X] **Trust boundaries:** Trust score never exceeds maximum or drops below minimum bounds.
+- [X] **Consistent penalties:** Ensure specific violations carry exact, predictable penalty weights.
+- [X] **Recovery rules:** Validate the conditions under which a restricted user can recover their standing.
+- [X] **Hidden fraud score:** Ensure the internal fraud risk score remains entirely unaffected by public-facing actions or user manipulations.
+
+
+## Phase 7 — Fraud Detection
+**Goal:** Stop abuse early.
+
+### Unit Tests
+- [x] Pattern detection (Analyzes dispute ratios and rapid contract creation)
+- [x] Device matching (Hashes IP and User-Agent)
+- [x] Risk scoring (Evaluates telemetry vectors and historical patterns)
+
+### Integration Tests
+- [x] Multiple suspicious contracts (+25 risk penalty)
+- [x] Fake dispute patterns (+30 to +60 risk penalty)
+- [x] Repeat account detection (Ban evasion via shared device footprint)
+
+### E2E Test
+- [x] Create suspicious behavior -> Fraud score increases -> Restrictions applied
+
+### Business Rule Tests
+- [x] False positives reviewed (Manual admin override logic)
+- [x] Fraud score remains private (Not exposed in public API serialzers)
+- [x] Restrictions proportional to risk (70=Restricted, 100=Suspended)
+
+## Phase 8: AI Contract Engine Integrity
+**Focus:** Validation of AI-generated contract components, state machine transitions, and business rule enforcement.
+
+* **AI Generation & Human-in-the-Loop:** Verified that backend business rules strictly gate the "Save, Patch, and Pay" flow. Tests confirm that user edits are safely incorporated without bypassing platform validation, neutralizing potential prompt injection vectors.
+* **Contract State Transitions:** Unit and integration tests validate the critical sequence of contract states (e.g., PROPOSED → FUNDED → RELEASED).
+* **System Integrity:** Verified that core platform modules interact cleanly with the AI generation outputs without breaking existing API schemas.
+
+Phase 9: Governance & Admin Access Control
+Focus: Strict Role-Based Access Control (RBAC) and immutable system logging.
+
+RBAC Enforcement (accounts/tests/test_admin_permissions.py):
+
+test_base_admin_blocks_inactive_and_regular_users: Ensures standard platform users and deactivated staff are strictly locked out of back-office endpoints.
+
+test_is_super_admin_blocks_lower_tiers: Validates that Tier-1 and Dispute managers cannot access highly privileged Super Admin endpoints.
+
+test_is_risk_officer_allows_super_admin_but_blocks_dispute_manager: Confirms role inheritance (Super Admins can execute Risk Officer duties) while preventing horizontal role escalation (Dispute Managers cannot access Risk endpoints).
+
+Immutable Audit Ledger (audit/tests/test_audit_logger.py):
+
+test_log_admin_action_creates_record: Proves the AuditLogger service accurately captures exact state-change payloads and generic model relationships.
+
+test_admin_audit_log_is_immutable: Validates the save() method override, proving that the database rejects any attempt to update or alter an existing audit log, ensuring cryptographic-level operational trust.
+
+Admin Dashboard & Discovery (accounts/tests/test_admin_dashboard.py):
+
+test_admin_can_list_users_with_pagination: Ensures backend stability by enforcing paginated list responses, preventing memory overloads when querying the entire user database.
+
+test_admin_can_search_by_email & test_admin_can_filter_suspended_users: Validates DRF filter integrations, proving Risk Officers can instantly isolate accounts by partial text search or account state (e.g., active vs. suspended).
+
+test_non_admins_are_blocked: Guarantees that internal dashboard data (like exact timestamps and trust scores) remains completely inaccessible to standard VENDOR or BUYER accounts.
+
+Governance End-to-End Workflow (accounts/tests/test_admin_e2e.py & accounts/tests/test_admin_integration.py):
+
+test_e2e_admin_investigates_and_penalizes_user: Simulates the complete circuit-breaker lifecycle—an admin searches for a reported user, identifies the target, applies a suspension penalty, and verifies the automated creation of the audit trail.
+
+test_risk_officer_can_suspend_user_and_creates_audit_log: Verifies that applying a penalty successfully toggles the target's is_active state to False and logs the exact Admin ID and state change payload.
+
+test_suspend_fails_without_justification: Ensures strict compliance by rejecting any administrative account suspensions that do not include a written justification payload.

@@ -5,7 +5,7 @@ from .views import (
     ContractDeleteView, DevKeysView, KYCVerificationView, RegistrationView, UserProfileView, BankListView, 
     ResolveAccountView, LinkBankView, WalletDashboardView,ContractViewSet,
     paystack_webhook,
-     PlatformAdminDashboardView, AdminUserManagementView,
+     PlatformAdminDashboardView, AdminUserManagementView, SuspendUserView
 )
 
 router = DefaultRouter()
@@ -38,6 +38,9 @@ urlpatterns = [
 
     path('dev/keys/', DevKeysView.as_view(), name='dev_keys'),
 
+
+# Phase 9: Admin Back-Office Routes
+    path('admin/users/<int:user_id>/suspend/', SuspendUserView.as_view(), name='admin-suspend-user'),
 
 
 ]

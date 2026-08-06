@@ -39,10 +39,14 @@ INSTALLED_APPS = [
     'django_celery_beat',
     'cloudinary_storage',
     'cloudinary',
+    'django_filters',
     
     # Local apps
     'accounts',
     'escrow',
+    'governance',
+    'notifications',
+    'audit',
 ]
 
 MIDDLEWARE = [
